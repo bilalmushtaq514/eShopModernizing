@@ -115,6 +115,7 @@ stages:
                 msbuildArgs: >-
                   $(msbuildCommon)
                   /p:DeployOnBuild=true
+                  /p:DeployDefaultTarget=WebPublish
                   /p:WebPublishMethod=FileSystem
                   /p:publishUrl="$(Build.ArtifactStagingDirectory)\site"
                   /p:DeleteExistingFiles=true
