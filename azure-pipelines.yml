@@ -1,0 +1,60 @@
+# Build-proof pipeline for the legacy app (assessment section 2.2):
+# "prove it builds on an Azure Pipelines Windows agent before committing to it".
+# This will be replaced by the full build -> rolling-deploy pipeline once the
+# repo choice is approved.
+
+name: legacy-build-proof-$(Date:yyyyMMdd)$(Rev:.r)
+
+trigger:
+  branches:
+    include: [main]
+pr:
+  branches:
+    include: [main]
+
+pool:
+  vmImage: windows-2022
+
+variables:
+  solution: eShopLegacyMVCSolution/eShopLegacyMVC.sln
+  webProject: eShopLegacyMVCSolution/src/eShopLegacyMVC/eShopLegacyMVC.csproj
+  buildConfiguration: Release
+  buildPlatform: AnyCPU
+
+steps:
+  - checkout: self
+    fetchDepth: 1
+
+  - powershell: |
+      Write-Host "== Agent image: $env:ImageOS $env:ImageVersion"
+      Write-Host "== .NET Framework targeting packs installed:"
+      Get-ChildItem 'C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework' -Directory | Select-Object -ExpandProperty Name
+      Write-Host "== MSBuild:"
+      & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe
+    displayName: Diagnostics - agent toolchain
+
+  - task: NuGetToolInstaller@1
+    displayName: Install NuGet
+
+  - task: NuGetCommand@2
+    displayName: NuGet restore
+    inputs:
+      command: restore
+      restoreSolution: $(solution)
+
+  - task: VSBuild@1
+    displayName: MSBuild - build + Web Deploy package
+    inputs:
+      solution: $(webProject)
+      platform: $(buildPlatform)
+      configuration: $(buildConfiguration)
+      msbuildArgs: >-
+        /p:DeployOnBuild=true
+        /p:WebPublishMethod=Package
+        /p:PackageAsSingleFile=true
+        /p:SkipInvalidConfigurations=true
+        /p:PackageLocation="$(Build.ArtifactStagingDirectory)\package"
+
+  - publish: $(Build.ArtifactStagingDirectory)\package
+    artifact: legacy-web-package
+    displayName: Publish Web Deploy package
