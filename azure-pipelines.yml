@@ -175,7 +175,7 @@ stages:
     variables:
       # Per-environment config, substituted into Web.config appSettings at deploy time.
       EnvironmentName: dev
-      UseMockData: 'false'   # DEMO: deliberately broken - app will try SQL Server, which does not exist
+      UseMockData: 'true'
     jobs:
       - deployment: iis
         displayName: Rolling deploy, one server at a time
