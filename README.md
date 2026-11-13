@@ -1,3 +1,25 @@
+> ## DevOps assessment fork
+>
+> This fork deploys **`eShopLegacyMVCSolution/src/eShopLegacyMVC`** (.NET Framework 4.7.2 / MVC 5) to **3 private Windows Server 2022 / IIS servers** via Azure DevOps. Platform, architecture and pipeline docs: **[bilalmushtaq514/platform-infra](https://github.com/bilalmushtaq514/platform-infra)**.
+>
+> **Database decision:** `UseMockData=true` (the app's built-in in-memory `CatalogServiceMock`), so no SQL Server is needed and the three nodes stay stateless and identical.
+>
+> **Changes made in this fork** (no application logic changed):
+>
+> | File | Change |
+> |---|---|
+> | `eShopLegacyMVCSolution/src/eShopLegacyMVC/Controllers/HealthController.cs` (+ `.csproj` entry) | `GET /health`: 200 only if the catalog is readable; returns server, build, environment |
+> | `.../Views/Shared/_Layout.cshtml` | Build / environment / server banner |
+> | `.../Web.config` | `BuildVersion` (stamped by CI) and `EnvironmentName` appSettings |
+> | `.../Web.Release.config` | Release hardening (`debug` off, `customErrors RemoteOnly`, no version header), `UseMockData=true` |
+> | `eShopLegacyMVCSolution/tests/eShopLegacyMVC.Tests/` | MSTest project (net472) - health + mock catalog (approved addition) |
+> | `iis-deploy/Deploy-IisSite.ps1` | Per-server stop -> switch release -> start -> health check; automatic per-server restore; rollback mode |
+> | `azure-pipelines.yml` | Windows build/test/package once -> approval -> rolling deploy (1 server at a time) -> per-node + internal LB verification |
+>
+> **Legacy build fix:** `eShopLegacy.Utilities` targets .NET 4.6.1, whose targeting pack is incomplete on current hosted `windows-2022` images (MSB3644). The pipeline builds with `/p:TargetFrameworkVersion=v4.7.2` instead of editing project files.
+
+---
+
 
 # eShopModernizing - Modernizing ASP.NET Web apps (MVC and WebForms) and N-Tier apps (WCF + WinForms) with Windows Containers and Azure
 
