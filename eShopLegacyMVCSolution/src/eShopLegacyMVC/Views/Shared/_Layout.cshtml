@@ -8,6 +8,10 @@
     @Scripts.Render("~/bundles/modernizr")
 </head>
 <body>
+    @* [Deployment addition] build banner: proves which build and which IIS server served this page. *@
+    <div id="build-banner" style="background:#1b1b1b;color:#ffd166;font:12px/1.8 monospace;text-align:right;padding:0 12px;">
+        build @(System.Configuration.ConfigurationManager.AppSettings["BuildVersion"]) &middot; env @(System.Configuration.ConfigurationManager.AppSettings["EnvironmentName"]) &middot; server @Environment.MachineName
+    </div>
     <header class="navbar navbar-light navbar-static-top">
         <div class="esh-header-brand">
             <a href="@Url.Action("index", "catalog")">

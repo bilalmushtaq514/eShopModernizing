@@ -1,65 +1,260 @@
-# Build-proof pipeline for the legacy app (assessment section 2.2):
-# "prove it builds on an Azure Pipelines Windows agent before committing to it".
-# This will be replaced by the full build -> rolling-deploy pipeline once the
-# repo choice is approved.
+# =============================================================================
+# eShopLegacyMVC (.NET Framework 4.7.2) -> 3 private IIS servers
+#
+#   Build_Test_Package   (push + PR)   windows-2022 hosted agent
+#     NuGet restore -> stamp build -> MSBuild publish (Web.Release.config transform)
+#     -> MSTest -> zip = the ONE artifact promoted to every server
+#   Deploy_IIS_dev       (main only)   Environment "iis-dev" (manual approval check)
+#     rolling, maxParallel 1: per server stop pool/site -> switch release -> start
+#     -> local /health must be 200 with the new build, else that server is restored
+#     and the run stops before the next server
+#   Verify_Through_ILB   (main only)   pod in AKS -> internal LB 10.20.10.10 + each node
+#
+# Connectivity: the Azure Pipelines agent ON each IIS VM opens an OUTBOUND HTTPS
+# long-poll to dev.azure.com (via NAT Gateway). Nothing inbound is opened.
+#
+# Rollback: run this pipeline with action=rollback (switches every server back to
+# its previous release folder, rolling, behind the same approval), or re-run the
+# Deploy stage of an older successful run (redeploys that run's artifact).
+# =============================================================================
 
-name: legacy-build-proof-$(Date:yyyyMMdd)$(Rev:.r)
+name: eshop-legacy-$(Date:yyyyMMdd)$(Rev:.r)
 
 trigger:
   branches:
     include: [main]
+  paths:
+    exclude: ["**/*.md"]
+
 pr:
   branches:
     include: [main]
 
-pool:
-  vmImage: windows-2022
+parameters:
+  - name: action
+    displayName: Action
+    type: string
+    default: deploy
+    values: [deploy, rollback]
+  - name: rollbackTo
+    displayName: "Rollback target (release folder = BuildId, or 'previous')"
+    type: string
+    default: previous
 
 variables:
-  solution: eShopLegacyMVCSolution/eShopLegacyMVC.sln
-  webProject: eShopLegacyMVCSolution/src/eShopLegacyMVC/eShopLegacyMVC.csproj
-  buildConfiguration: Release
-  buildPlatform: AnyCPU
+  - group: platform-dev                 # AKS_NAME, AKS_RESOURCE_GROUP, IIS_LB_IP, IIS_VM_IPS (non-secret)
+  - name: azureServiceConnection
+    value: sc-azure-apps
+  - name: solution
+    value: eShopLegacyMVCSolution/eShopLegacyMVC.sln
+  - name: webProject
+    value: eShopLegacyMVCSolution/src/eShopLegacyMVC/eShopLegacyMVC.csproj
+  - name: testProject
+    value: eShopLegacyMVCSolution/tests/eShopLegacyMVC.Tests/eShopLegacyMVC.Tests.csproj
+  - name: buildConfiguration
+    value: Release
+  - name: isMain
+    value: ${{ eq(variables['Build.SourceBranch'], 'refs/heads/main') }}
+  # Legacy build fix (see README): helper lib targets net461, whose targeting pack is
+  # incomplete on current hosted images -> build everything against 4.7.2.
+  - name: msbuildCommon
+    value: /p:TargetFrameworkVersion=v4.7.2
 
-steps:
-  - checkout: self
-    fetchDepth: 1
+stages:
+  # ---------------------------------------------------------------------------
+  - ${{ if eq(parameters.action, 'deploy') }}:
+    - stage: Build_Test_Package
+      displayName: Build, test & package
+      jobs:
+        - job: build
+          displayName: MSBuild / MSTest / package
+          pool:
+            vmImage: windows-2022
+          steps:
+            - checkout: self
+              fetchDepth: 1
 
-  - powershell: |
-      Write-Host "== Agent image: $env:ImageOS $env:ImageVersion"
-      Write-Host "== .NET Framework targeting packs installed:"
-      Get-ChildItem 'C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework' -Directory | Select-Object -ExpandProperty Name
-      Write-Host "== MSBuild:"
-      & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe
-    displayName: Diagnostics - agent toolchain
+            - powershell: |
+                $sha = "$(Build.SourceVersion)".Substring(0,7)
+                $v = "$(Build.BuildId)-$sha"
+                Write-Host "Build version: $v"
+                Write-Host "##vso[task.setvariable variable=buildVersion]$v"
+              displayName: Compute build version
 
-  - task: NuGetToolInstaller@1
-    displayName: Install NuGet
+            - task: NuGetToolInstaller@1
+              displayName: Install NuGet
 
-  - task: NuGetCommand@2
-    displayName: NuGet restore
-    inputs:
-      command: restore
-      restoreSolution: $(solution)
+            - task: NuGetCommand@2
+              displayName: NuGet restore (packages.config / PackageReference)
+              inputs:
+                command: restore
+                restoreSolution: $(solution)
 
-  - task: VSBuild@1
-    displayName: MSBuild - build + Web Deploy package
-    inputs:
-      solution: $(webProject)
-      platform: $(buildPlatform)
-      configuration: $(buildConfiguration)
-      # Legacy build fix: eShopLegacy.Utilities targets net461, whose targeting
-      # pack is incomplete on current hosted images (MSB3644, run #112).
-      # Retarget the whole build to 4.7.2 (the web app's own TFM) instead of
-      # editing project files. Servers run .NET Framework 4.8, so runtime is unchanged.
-      msbuildArgs: >-
-        /p:TargetFrameworkVersion=v4.7.2
-        /p:DeployOnBuild=true
-        /p:WebPublishMethod=Package
-        /p:PackageAsSingleFile=true
-        /p:SkipInvalidConfigurations=true
-        /p:PackageLocation="$(Build.ArtifactStagingDirectory)\package"
+            # B-2: the build stamp is baked into the artifact (immutable); per-environment
+            # values are substituted at deploy time instead.
+            - powershell: |
+                $path = "eShopLegacyMVCSolution/src/eShopLegacyMVC/Web.config"
+                [xml]$x = Get-Content $path
+                ($x.configuration.appSettings.add | Where-Object key -eq 'BuildVersion').value = "$(buildVersion)"
+                $x.Save((Resolve-Path $path))
+                Select-String -Path $path -Pattern 'BuildVersion'
+              displayName: Stamp BuildVersion into Web.config
 
-  - publish: $(Build.ArtifactStagingDirectory)\package
-    artifact: legacy-web-package
-    displayName: Publish Web Deploy package
+            - task: VSBuild@1
+              displayName: MSBuild publish (applies Web.Release.config)
+              inputs:
+                solution: $(webProject)
+                configuration: $(buildConfiguration)
+                platform: AnyCPU
+                msbuildArgs: >-
+                  $(msbuildCommon)
+                  /p:DeployOnBuild=true
+                  /p:WebPublishMethod=FileSystem
+                  /p:publishUrl="$(Build.ArtifactStagingDirectory)\site"
+                  /p:DeleteExistingFiles=true
+                  /p:SkipInvalidConfigurations=true
+
+            - task: VSBuild@1
+              displayName: MSBuild tests
+              inputs:
+                solution: $(testProject)
+                configuration: $(buildConfiguration)
+                msbuildArgs: /restore $(msbuildCommon)
+
+            - task: VSTest@2
+              displayName: Run tests (MSTest)
+              inputs:
+                testSelector: testAssemblies
+                testAssemblyVer2: |
+                  **\eShopLegacyMVC.Tests\bin\$(buildConfiguration)\**\eShopLegacyMVC.Tests.dll
+                codeCoverageEnabled: true
+                testRunTitle: eShopLegacyMVC $(Build.BuildNumber)
+
+            - powershell: |
+                $cfg = "$(Build.ArtifactStagingDirectory)\site\Web.config"
+                if (Select-String -Path $cfg -Pattern 'debug="true"' -Quiet) { throw 'Release transform not applied (debug=true)' }
+                Select-String -Path $cfg -Pattern 'BuildVersion|UseMockData|EnvironmentName|customErrors'
+              displayName: Verify transformed Web.config
+
+            - task: ArchiveFiles@2
+              displayName: Zip site
+              inputs:
+                rootFolderOrFile: $(Build.ArtifactStagingDirectory)\site
+                includeRootFolder: false
+                archiveType: zip
+                archiveFile: $(Build.ArtifactStagingDirectory)\drop\eshop-legacy.zip
+
+            - task: CopyFiles@2
+              displayName: Add deploy scripts to artifact
+              inputs:
+                sourceFolder: deploy
+                targetFolder: $(Build.ArtifactStagingDirectory)\drop\deploy
+
+            - powershell: Set-Content "$(Build.ArtifactStagingDirectory)\drop\version.txt" "$(buildVersion)"
+              displayName: Record version
+
+            - publish: $(Build.ArtifactStagingDirectory)\drop
+              artifact: legacy-site
+              displayName: Publish artifact (built once, promoted)
+
+  # ---------------------------------------------------------------------------
+  - stage: Deploy_IIS_dev
+    displayName: ${{ format('{0} - IIS (dev, rolling)', parameters.action) }}
+    ${{ if eq(parameters.action, 'deploy') }}:
+      dependsOn: Build_Test_Package
+    ${{ else }}:
+      dependsOn: []
+    condition: and(succeeded(), eq(variables.isMain, 'True'), ne(variables['Build.Reason'], 'PullRequest'))
+    variables:
+      # Per-environment config, substituted into Web.config appSettings at deploy time.
+      EnvironmentName: dev
+      UseMockData: 'true'
+    jobs:
+      - deployment: iis
+        displayName: Rolling deploy, one server at a time
+        environment:
+          name: iis-dev
+          resourceType: VirtualMachine
+          tags: iis
+        strategy:
+          rolling:
+            maxParallel: 1                 # B-4: never more than one server out of the pool
+            deploy:
+              steps:
+                - ${{ if eq(parameters.action, 'deploy') }}:
+                  - download: current
+                    artifact: legacy-site
+
+                  - task: FileTransform@1
+                    displayName: Substitute environment settings (EnvironmentName, UseMockData)
+                    inputs:
+                      folderPath: $(Pipeline.Workspace)/legacy-site/eshop-legacy.zip
+                      fileType: xml
+                      targetFiles: Web.config
+
+                  - powershell: |
+                      $v = Get-Content "$(Pipeline.Workspace)\legacy-site\version.txt"
+                      & "$(Pipeline.Workspace)\legacy-site\deploy\Deploy-IisSite.ps1" `
+                        -Action Deploy `
+                        -PackageZip "$(Pipeline.Workspace)\legacy-site\eshop-legacy.zip" `
+                        -ReleaseId "$(Build.BuildId)" `
+                        -ExpectedBuild $v
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                    displayName: Stop -> switch release -> start -> local health check
+
+                - ${{ if eq(parameters.action, 'rollback') }}:
+                  - checkout: self
+                    fetchDepth: 1
+                  - powershell: |
+                      & "$(Build.SourcesDirectory)\deploy\Deploy-IisSite.ps1" -Action Rollback -RollbackTo "${{ parameters.rollbackTo }}"
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                    displayName: Roll back this server to ${{ parameters.rollbackTo }}
+
+            on:
+              failure:
+                steps:
+                  - powershell: |
+                      Write-Host "##vso[task.logissue type=error]Deployment failed on $env:COMPUTERNAME. Remaining servers were NOT touched."
+                      Get-Content C:\inetpub\eshop\release-history.txt -ErrorAction SilentlyContinue | Select-Object -Last 3
+                    displayName: Report failed server
+
+  # ---------------------------------------------------------------------------
+  - stage: Verify_Through_ILB
+    displayName: Verify through internal LB (from AKS pod)
+    dependsOn: Deploy_IIS_dev
+    condition: and(succeeded(), eq(variables.isMain, 'True'), ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - job: verify
+        displayName: Per-node + ILB health from inside the VNet
+        pool:
+          vmImage: ubuntu-24.04
+        steps:
+          - checkout: none
+          - task: KubeloginInstaller@0
+          - task: AzureCLI@2
+            displayName: curl ILB and each node from a pod in AKS
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                az aks get-credentials -g "$(AKS_RESOURCE_GROUP)" -n "$(AKS_NAME)" --overwrite-existing
+                kubelogin convert-kubeconfig -l azurecli
+                # The hosted agent cannot reach 10.20.x.x - a pod inside the VNet can.
+                # (Calling the ILB from one of its own backend VMs would hit Azure's no-hairpin rule.)
+                script='
+                  fail=0
+                  for ip in '"$(IIS_VM_IPS)"'; do
+                    out=$(curl -s -m 10 -w " HTTP%{http_code}" http://$ip/health) || true
+                    echo "node $ip -> $out"; echo "$out" | grep -q "HTTP200$" || fail=1
+                  done
+                  for i in $(seq 1 12); do
+                    out=$(curl -s -m 10 -w " HTTP%{http_code}" http://'"$(IIS_LB_IP)"'/health) || true
+                    echo "ILB  #$i -> $out"; echo "$out" | grep -q "HTTP200$" || fail=1
+                  done
+                  exit $fail'
+                kubectl run "ilb-check-$(Build.BuildId)" -n default --image=curlimages/curl:8.11.1 \
+                  --restart=Never --rm -i --quiet --command -- sh -c "$script" | tee verify.log
+                echo "Distinct servers behind the ILB:"
+                grep '^ILB' verify.log | grep -o '"Server":"[^"]*"' | sort | uniq -c
