@@ -147,8 +147,8 @@ stages:
             - task: CopyFiles@2
               displayName: Add deploy scripts to artifact
               inputs:
-                sourceFolder: deploy
-                targetFolder: $(Build.ArtifactStagingDirectory)\drop\deploy
+                sourceFolder: iis-deploy
+                targetFolder: $(Build.ArtifactStagingDirectory)\drop\iis-deploy
 
             - powershell: Set-Content "$(Build.ArtifactStagingDirectory)\drop\version.txt" "$(buildVersion)"
               displayName: Record version
@@ -194,7 +194,7 @@ stages:
 
                   - powershell: |
                       $v = Get-Content "$(Pipeline.Workspace)\legacy-site\version.txt"
-                      & "$(Pipeline.Workspace)\legacy-site\deploy\Deploy-IisSite.ps1" `
+                      & "$(Pipeline.Workspace)\legacy-site\iis-deploy\Deploy-IisSite.ps1" `
                         -Action Deploy `
                         -PackageZip "$(Pipeline.Workspace)\legacy-site\eshop-legacy.zip" `
                         -ReleaseId "$(Build.BuildId)" `
@@ -206,7 +206,7 @@ stages:
                   - checkout: self
                     fetchDepth: 1
                   - powershell: |
-                      & "$(Build.SourcesDirectory)\deploy\Deploy-IisSite.ps1" -Action Rollback -RollbackTo "${{ parameters.rollbackTo }}"
+                      & "$(Build.SourcesDirectory)\iis-deploy\Deploy-IisSite.ps1" -Action Rollback -RollbackTo "${{ parameters.rollbackTo }}"
                       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                     displayName: Roll back this server to ${{ parameters.rollbackTo }}
 
