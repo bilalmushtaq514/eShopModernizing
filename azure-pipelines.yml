@@ -24,7 +24,7 @@ trigger:
   branches:
     include: [main]
   paths:
-    exclude: ["**/*.md"]
+    exclude: ["*.md", "**/*.md"]
 
 pr:
   branches:
@@ -90,6 +90,12 @@ stages:
                 command: restore
                 restoreSolution: $(solution)
 
+            - task: NuGetCommand@2
+              displayName: NuGet restore (test project)
+              inputs:
+                command: restore
+                restoreSolution: $(testProject)
+
             # B-2: the build stamp is baked into the artifact (immutable); per-environment
             # values are substituted at deploy time instead.
             - powershell: |
@@ -119,7 +125,7 @@ stages:
               inputs:
                 solution: $(testProject)
                 configuration: $(buildConfiguration)
-                msbuildArgs: /restore $(msbuildCommon)
+                msbuildArgs: $(msbuildCommon)
 
             - task: VSTest@2
               displayName: Run tests (MSTest)

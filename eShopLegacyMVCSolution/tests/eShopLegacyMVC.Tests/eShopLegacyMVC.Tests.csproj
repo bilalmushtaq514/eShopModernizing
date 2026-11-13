@@ -6,14 +6,18 @@
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
     <LangVersion>7.3</LangVersion>
+    <!-- The referenced legacy web project already has an inconsistent graph upstream
+         (pins System.Diagnostics.DiagnosticSource 4.5.1 while Autofac 6.1.0 needs >= 4.7.1).
+         The web project restores this as a warning; the SDK test project would make it an
+         error. Keep it a warning here instead of changing the app's dependencies. -->
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);NU1605</WarningsNotAsErrors>
+    <NoWarn>$(NoWarn);NU1605</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="MSTest.TestAdapter" Version="3.6.4" />
     <PackageReference Include="MSTest.TestFramework" Version="3.6.4" />
     <PackageReference Include="Microsoft.AspNet.Mvc" Version="5.2.7" />
-    <PackageReference Include="Autofac" Version="4.9.1" />
-    <PackageReference Include="EntityFramework" Version="6.2.0" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\eShopLegacyMVC\eShopLegacyMVC.csproj" />
