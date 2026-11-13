@@ -48,7 +48,12 @@ steps:
       solution: $(webProject)
       platform: $(buildPlatform)
       configuration: $(buildConfiguration)
+      # Legacy build fix: eShopLegacy.Utilities targets net461, whose targeting
+      # pack is incomplete on current hosted images (MSB3644, run #112).
+      # Retarget the whole build to 4.7.2 (the web app's own TFM) instead of
+      # editing project files. Servers run .NET Framework 4.8, so runtime is unchanged.
       msbuildArgs: >-
+        /p:TargetFrameworkVersion=v4.7.2
         /p:DeployOnBuild=true
         /p:WebPublishMethod=Package
         /p:PackageAsSingleFile=true
